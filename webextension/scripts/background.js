@@ -11,7 +11,7 @@ if (typeof importScripts === 'function') {
 /*   global isNotExcludedUrl, getCleanUrl, isArchiveUrl, isValidUrl, notifyMsg, openByWindowSetting, sleep, wmAvailabilityCheck, hostURL */
 /*   global initDefaultOptions, badgeCountText, getWaybackCount, newshosts, dateToTimestamp, fixedEncodeURIComponent, checkLastError */
 /*   global hostHeaders, timestampToDate, isBadgeOnTop, isUrlInList, saveTabData, clearTabData, readTabData, initAutoExcludeList */
-/*   global isDevVersion, checkAuthentication, setupContextMenus, cropPrefix, alertMsg */
+/*   global isDevVersion, checkAuthentication, setupContextMenus, cropPrefix, alertMsg, addToSaveQueue */
 
 let globalAPICache = new Map()
 const API_CACHE_SIZE = 5
@@ -873,19 +873,95 @@ function autoSaveChecked(atab, url, beforeDate) {
 }
 */
 
-// Add a listener for handling Auto Save Bookmarks.
+/* * * Auto Save Bookmarks * * */
+
+// Delay between each queued save, so bookmarking many tabs at once doesn't overload SPN.
+const BOOKMARK_SAVE_DELAY = 10000
+// Max number of bookmarks waiting in the queue to be saved.
+const BOOKMARK_QUEUE_MAX = 100
+let gBookmarkQueueLock = Promise.resolve()
+let gBookmarkQueueRunning = false
+let gBookmarksImporting = false
+
+/**
+ * Applies updateFn to the bookmark save queue kept in storage, so it survives the background restarting.
+ * Calls are chained so that many bookmarks created at once don't overwrite each other's changes.
+ * @param updateFn {function}: takes the queue Array and returns { queue: Array, value: any }.
+ * @return {Promise}: resolves to the value returned by updateFn.
+ */
+function updateBookmarkQueue(updateFn) {
+  const p = gBookmarkQueueLock.then(async () => {
+    const items = await chrome.storage.local.get(['auto_bookmark_queue'])
+    const result = updateFn(items?.auto_bookmark_queue || [])
+    await chrome.storage.local.set({ auto_bookmark_queue: result.queue })
+    return result.value
+  })
+  gBookmarkQueueLock = p.catch(() => {})
+  return p
+}
+
+// Adds URL to the bookmark save queue, then starts processing the queue if not already running.
+function queueBookmarkSave(url, tabId) {
+  updateBookmarkQueue((queue) => {
+    const result = addToSaveQueue(queue, [{ url, tabId }], BOOKMARK_QUEUE_MAX)
+    return { queue: result.queue, value: result.dropped }
+  })
+  .then((dropped) => {
+    if (dropped > 0) { console.log('Auto Save Bookmarks queue full, skipped: ' + url) }
+    processBookmarkQueue()
+  })
+  .catch((err) => { console.log(err) })
+}
+
+// Saves each URL in the bookmark queue one at a time, waiting BOOKMARK_SAVE_DELAY between each.
+// Also called on start to resume a queue left unfinished when the background was stopped.
+async function processBookmarkQueue() {
+  if (gBookmarkQueueRunning) { return }
+  gBookmarkQueueRunning = true
+  try {
+    let isFirst = true
+    while (true) {
+      if (!isFirst) { await sleep(BOOKMARK_SAVE_DELAY) }
+      isFirst = false
+      const settings = await chrome.storage.local.get(['auto_bookmark_setting'])
+      const entry = await updateBookmarkQueue((queue) => {
+        // clear queue if setting was turned off
+        if (!settings?.auto_bookmark_setting || queue.length === 0) {
+          // mark as stopped here, in turn with other queue updates, so a URL added right after starts a new run.
+          gBookmarkQueueRunning = false
+          return { queue: [], value: null }
+        }
+        return { queue: queue.slice(1), value: queue[0] }
+      })
+      if (!entry) { break }
+      // tab is only used to update its toolbar icon, so skip if closed or now showing a different page.
+      let atab = null
+      try {
+        atab = await chrome.tabs.get(entry.tabId)
+      } catch (err) {
+        // tab was closed
+      }
+      await autoSave((atab?.url === entry.url) ? atab : null, entry.url)
+    }
+  } catch (err) {
+    console.log(err)
+    gBookmarkQueueRunning = false
+  }
+}
+
+// Called whenever a bookmark is created.
 function autoBookmarksListener(id, bookmark) {
-  // This runs whenever a bookmark is saved.
+  if (gBookmarksImporting) { return }
   if (bookmark?.url && isValidUrl(bookmark.url) && isNotExcludedUrl(bookmark.url) && !isArchiveUrl(bookmark.url)) {
     chrome.storage.local.get(['auto_bookmark_setting'], (settings) => {
       if (settings?.auto_bookmark_setting) {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          // The check here that current tab URL == bookmark URL is a temp solution to
-          // the issue caused when bookmarking "All Tabs" which could cause too many saves at once.
-          // This forces only 1 URL to be saved. Also prevents importing URLs from saving any.
-          // Trying to solve multiple URLs would require a queue. Could open a Bulk Save window?
-          if (tabs?.[0] && (tabs[0].url === bookmark.url)) {
-            autoSave(tabs[0], bookmark.url)
+        // Only save bookmarks for pages open in a tab, such as when bookmarking one or all tabs.
+        // This skips bookmarks that are imported or synced from another device.
+        chrome.tabs.query({}, (tabs) => {
+          const atab = tabs?.find(tab => tab.active && (tab.url === bookmark.url)) ||
+            tabs?.find(tab => tab.url === bookmark.url)
+          if (atab) {
+            queueBookmarkSave(bookmark.url, atab.id)
           }
         })
       }
@@ -893,11 +969,17 @@ function autoBookmarksListener(id, bookmark) {
   }
 }
 
+// Ignore bookmarks created during an import. (Chrome only)
+function bookmarksImportBeganListener() { gBookmarksImporting = true }
+function bookmarksImportEndedListener() { gBookmarksImporting = false }
+
 // Should call this after 'bookmarks' permission Allowed and on start.
 function setupAutoSaveBookmarks() {
   // adding a named function instead of anonymous function should prevent multiple listeners from being added.
   // safari doesn't support chrome.bookmarks
   chrome.bookmarks?.onCreated?.addListener(autoBookmarksListener)
+  chrome.bookmarks?.onImportBegan?.addListener(bookmarksImportBeganListener)
+  chrome.bookmarks?.onImportEnded?.addListener(bookmarksImportEndedListener)
 }
 
 // Called when an optional permission is acquired such as 'bookmarks'.
@@ -914,6 +996,8 @@ chrome.permissions.onAdded.addListener((permissions) => {
 
 // Called once on extension load, in case permission allowed on start.
 setupAutoSaveBookmarks()
+// Resume saving any bookmarks still queued from before the background was stopped.
+processBookmarkQueue()
 
 // Call Context Notices API, parse and store results if success, then set the toolbar state.
 //

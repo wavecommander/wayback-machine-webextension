@@ -13,6 +13,7 @@ const makeValidURL = require('../webextension/scripts/utils').makeValidURL
 const cropPrefix = require('../webextension/scripts/utils').cropPrefix
 const cropScheme = require('../webextension/scripts/utils').cropScheme
 const matchWildcard = require('../webextension/scripts/utils').matchWildcard
+const addToSaveQueue = require('../webextension/scripts/utils').addToSaveQueue
 
 describe('twitter', () => {
   it('should extract correct tweet url', () => {
@@ -322,3 +323,39 @@ describe('matchWildcard', () => {
   })
 })
 
+
+describe('addToSaveQueue', () => {
+  const a = { url: 'https://a.com/', tabId: 1 }
+  const b = { url: 'https://b.com/', tabId: 2 }
+  const c = { url: 'https://c.com/', tabId: 3 }
+
+  it('should append entries in order', () => {
+    const result = addToSaveQueue([a], [b, c], 10)
+    expect(result.queue).to.deep.equal([a, b, c])
+    expect(result.added).to.equal(2)
+    expect(result.dropped).to.equal(0)
+  })
+  it('should treat a missing queue as empty', () => {
+    expect(addToSaveQueue(undefined, [a], 10).queue).to.deep.equal([a])
+  })
+  it('should skip URLs already in queue', () => {
+    const result = addToSaveQueue([a], [{ url: a.url, tabId: 9 }, b, b], 10)
+    expect(result.queue).to.deep.equal([a, b])
+    expect(result.added).to.equal(1)
+    expect(result.dropped).to.equal(0)
+  })
+  it('should skip entries without a URL', () => {
+    expect(addToSaveQueue([], [{ tabId: 1 }, null, a], 10).queue).to.deep.equal([a])
+  })
+  it('should drop entries beyond max size', () => {
+    const result = addToSaveQueue([a], [b, c], 2)
+    expect(result.queue).to.deep.equal([a, b])
+    expect(result.added).to.equal(1)
+    expect(result.dropped).to.equal(1)
+  })
+  it('should not modify the original queue', () => {
+    const queue = [a]
+    addToSaveQueue(queue, [b], 10)
+    expect(queue).to.deep.equal([a])
+  })
+})

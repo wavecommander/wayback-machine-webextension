@@ -214,6 +214,19 @@ TODO
 </tr>
 
 <tr>
+<th>Auto Save Bookmarks</th>
+<td>
+<ul>
+<li>Bookmark a single page. It should save right away and the toolbar icon should show saving.</li>
+<li>Open several tabs and use <i>Bookmark All Tabs</i>. Every tab should be saved, one at a time, about 10 seconds apart.</li>
+<li>Close a tab while it's still queued. Its URL should still be saved.</li>
+<li>Turn the setting off while bookmarks are queued. Any remaining queued saves should not happen.</li>
+<li>Import bookmarks, or bookmark a URL that isn't open in a tab. Nothing should be saved.</li>
+</ul>
+</td>
+</tr>
+
+<tr>
 <th>Email Outlinks</th>
 <td>
 TODO

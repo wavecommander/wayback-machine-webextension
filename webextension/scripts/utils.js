@@ -622,6 +622,29 @@ function isUrlInList(url, patterns) {
 }
 
 /**
+ * Returns a new save queue with the given entries appended.
+ * Entries whose URL is already in the queue are skipped, and entries beyond maxSize are dropped.
+ * @param queue {Array}: existing queue of { url, tabId } entries. May be undefined.
+ * @param entries {Array}: new { url, tabId } entries to append.
+ * @param maxSize {number}: max number of entries allowed in queue.
+ * @return {Object}: { queue: Array, added: number, dropped: number }
+ */
+function addToSaveQueue(queue, entries, maxSize) {
+  let newQueue = Array.isArray(queue) ? queue.slice() : []
+  let added = 0, dropped = 0
+  for (const entry of entries) {
+    if (!entry?.url || newQueue.some(e => e.url === entry.url)) { continue }
+    if (newQueue.length >= maxSize) {
+      dropped++
+    } else {
+      newQueue.push(entry)
+      added++
+    }
+  }
+  return { queue: newQueue, added, dropped }
+}
+
+/**
  * Customizes error handling
  * @param status {string}
  * @return {string}
@@ -857,6 +880,7 @@ if (typeof module !== 'undefined') {
     isArchiveUrl,
     isValidUrl,
     isUrlInList,
+    addToSaveQueue,
     matchWildcard,
     makeValidURL,
     cropPrefix,
